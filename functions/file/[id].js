@@ -1,8 +1,5 @@
 export async function onRequest(context) {
     const { request, env, params } = context;
-    const url = new URL(request.url);
-    
-    // 从参数中提取文件名，例如 "AgACAgE...gif"
     const fileName = params.id;
     const fileId = fileName.split(".")[0];
     const ext = fileName.split('.').pop().toLowerCase();
@@ -14,47 +11,42 @@ export async function onRequest(context) {
         const fileInfo = await fileInfoRes.json();
 
         if (!fileInfo.ok) {
-            // 如果 Bot 接口找不到，尝试回退到 Telegraph 原始地址（兼容旧图）
+            // 兼容旧的 Telegraph 路径
             return fetch(`https://telegra.ph/file/${fileName}`);
         }
 
         const filePath = fileInfo.result.file_path;
         const finalUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
 
-        // 2. 抓取文件流
+        // 2. 抓取文件原始流
         const response = await fetch(finalUrl);
+        if (!response.ok) return response;
 
-        // 3. 【最关键】构造全新的 Headers，彻底干掉“直接下载”的行为
-        const newHeaders = new Headers(response.headers);
+        // 3. 【最关键修复】手动重构 Headers，干掉强制下载头
+        const newHeaders = new Headers();
         
-        // 映射 MIME 类型
-        const mimeTypes = {
+        // 映射正确的图片类型，防止浏览器当成文件下载
+        const mimeMap = {
             'gif': 'image/gif',
             'png': 'image/png',
             'jpg': 'image/jpeg',
             'jpeg': 'image/jpeg',
             'webp': 'image/webp'
         };
-
-        if (mimeTypes[ext]) {
-            newHeaders.set('Content-Type', mimeTypes[ext]);
-        } else {
-            newHeaders.set('Content-Type', 'image/gif'); // 默认兜底为 gif
-        }
-
-        // 移除可能导致强制下载的 Header (如果 Telegram 返回了的话)
-        newHeaders.delete('Content-Disposition');
+        newHeaders.set('Content-Type', mimeMap[ext] || 'image/png');
         
-        // 允许跨域，方便 Markdown 预览
+        // 核心：强制改为 inline（预览）而非 attachment（下载）
+        newHeaders.set('Content-Disposition', 'inline');
         newHeaders.set('Access-Control-Allow-Origin', '*');
         newHeaders.set('Cache-Control', 'public, max-age=31536000');
 
+        // 使用原本的响应流构造新响应
         return new Response(response.body, {
-            status: response.status,
-            headers: newHeaders,
+            status: 200,
+            headers: newHeaders
         });
 
     } catch (e) {
-        return new Response(JSON.stringify({ error: e.message }), { status: 500 });
+        return new Response(e.message, { status: 500 });
     }
 }
