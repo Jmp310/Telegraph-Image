@@ -2,27 +2,22 @@ import { errorHandling, telemetryData } from "./utils/middleware";
 
 export async function onRequestPost(context) {
     const { request, env } = context;
-
     try {
         const clonedRequest = request.clone();
         const formData = await clonedRequest.formData();
-
         await errorHandling(context);
         telemetryData(context);
 
         const uploadFile = formData.get('file');
-        if (!uploadFile) {
-            throw new Error('No file uploaded');
-        }
+        if (!uploadFile) throw new Error('No file uploaded');
 
         const fileName = uploadFile.name;
         const fileExtension = fileName.split('.').pop().toLowerCase();
-
         const telegramFormData = new FormData();
         telegramFormData.append("chat_id", env.TG_Chat_ID);
 
         let apiEndpoint;
-        // 强制：GIF 必须作为 document 上传以保留动图属性
+        // 强制 GIF 走 document 接口，防止转为静态 JPG
         if (fileExtension === 'gif') {
             telegramFormData.append("document", uploadFile);
             apiEndpoint = 'sendDocument';
@@ -34,43 +29,25 @@ export async function onRequestPost(context) {
             apiEndpoint = 'sendDocument';
         }
 
-        const result = await sendToTelegram(telegramFormData, apiEndpoint, env);
-        if (!result.success) throw new Error(result.error);
+        const apiUrl = `https://api.telegram.org/bot${env.TG_Bot_Token}/${apiEndpoint}`;
+        const res = await fetch(apiUrl, { method: "POST", body: telegramFormData });
+        const result = await res.json();
 
-        const fileId = getFileId(result.data);
-        if (!fileId) throw new Error('Failed to get file ID');
+        if (!result.ok) throw new Error(result.description);
 
-        // 保存 KV 记录
+        const fileId = result.result.document ? result.result.document.file_id : 
+                       (result.result.photo ? result.result.photo[result.result.photo.length - 1].file_id : null);
+
         if (env.img_url) {
             await env.img_url.put(`${fileId}.${fileExtension}`, "", {
-                metadata: {
-                    TimeStamp: Date.now(),
-                    ListType: "None", Label: "None", liked: false,
-                    fileName: fileName, fileSize: uploadFile.size,
-                }
+                metadata: { TimeStamp: Date.now(), ListType: "None", Label: "None", liked: false, fileName, fileSize: uploadFile.size }
             });
         }
 
-        return new Response(
-            JSON.stringify([{ 'src': `/file/${fileId}.${fileExtension}` }]),
-            { status: 200, headers: { 'Content-Type': 'application/json' } }
-        );
+        return new Response(JSON.stringify([{ 'src': `/file/${fileId}.${fileExtension}` }]), {
+            status: 200, headers: { 'Content-Type': 'application/json' }
+        });
     } catch (error) {
         return new Response(JSON.stringify({ error: error.message }), { status: 500 });
     }
-}
-
-function getFileId(response) {
-    if (!response.ok || !response.result) return null;
-    const res = response.result;
-    if (res.photo) return res.photo[res.photo.length - 1].file_id;
-    if (res.document) return res.document.file_id;
-    return null;
-}
-
-async function sendToTelegram(formData, apiEndpoint, env) {
-    const apiUrl = `https://api.telegram.org/bot${env.TG_Bot_Token}/${apiEndpoint}`;
-    const response = await fetch(apiUrl, { method: "POST", body: formData });
-    const responseData = await response.json();
-    return { success: response.ok, data: responseData, error: responseData.description };
 }
