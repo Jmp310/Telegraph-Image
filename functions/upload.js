@@ -21,9 +21,15 @@ export async function onRequestPost(context) {
         const telegramFormData = new FormData();
         telegramFormData.append("chat_id", env.TG_Chat_ID);
 
-        // 根据文件类型选择合适的上传方式
+        // --- 核心修改开始 ---
         let apiEndpoint;
-        if (uploadFile.type.startsWith('image/')) {
+        // 如果是 GIF，强行走 document 接口以保留动图属性
+        if (fileExtension === 'gif') {
+            telegramFormData.append("document", uploadFile);
+            apiEndpoint = 'sendDocument';
+        } 
+        // 其他常规图片走 photo 接口
+        else if (uploadFile.type.startsWith('image/')) {
             telegramFormData.append("photo", uploadFile);
             apiEndpoint = 'sendPhoto';
         } else if (uploadFile.type.startsWith('audio/')) {
@@ -36,6 +42,7 @@ export async function onRequestPost(context) {
             telegramFormData.append("document", uploadFile);
             apiEndpoint = 'sendDocument';
         }
+        // --- 核心修改结束 ---
 
         const result = await sendToTelegram(telegramFormData, apiEndpoint, env);
 
@@ -112,7 +119,6 @@ async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
 
         // 图片上传失败时转为文档方式重试
         if (retryCount < MAX_RETRIES && apiEndpoint === 'sendPhoto') {
-            console.log('Retrying image as document...');
             const newFormData = new FormData();
             newFormData.append('chat_id', formData.get('chat_id'));
             newFormData.append('document', formData.get('photo'));
