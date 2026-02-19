@@ -1,45 +1,33 @@
 export async function onRequest(context) {
-    const {
-        request,
-        env,
-        params,
-    } = context;
-
+    const { request, env, params } = context;
     const url = new URL(request.url);
-    const fileName = params.id;
-    const fileId = fileName.split(".")[0]; // 获取 ID 部分
     
-    // 默认路径（Telegraph 原始路径）
-    let fileUrl = 'https://telegra.ph' + url.pathname + url.search;
+    // 从参数中提取文件名，例如 "AgACAgE...gif"
+    const fileName = params.id;
+    const fileId = fileName.split(".")[0];
+    const ext = fileName.split('.').pop().toLowerCase();
 
     try {
-        // 1. 判断是否为 Bot 上传的长 ID (长度通常 > 39)
-        if (url.pathname.split("/")[2]?.length > 39) {
-            const filePath = await getFilePath(env, fileId);
-            if (filePath) {
-                fileUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
-            }
+        // 1. 获取 Telegram 文件真实路径
+        const getFileUrl = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${fileId}`;
+        const fileInfoRes = await fetch(getFileUrl);
+        const fileInfo = await fileInfoRes.json();
+
+        if (!fileInfo.ok) {
+            // 如果 Bot 接口找不到，尝试回退到 Telegraph 原始地址（兼容旧图）
+            return fetch(`https://telegra.ph/file/${fileName}`);
         }
 
-        // 2. 获取原始响应
-        const originalResponse = await fetch(fileUrl, {
-            method: "GET",
-            headers: {
-                "User-Agent": "Mozilla/5.0",
-            }
-        });
+        const filePath = fileInfo.result.file_path;
+        const finalUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
 
-        if (!originalResponse.ok) return originalResponse;
+        // 2. 抓取文件流
+        const response = await fetch(finalUrl);
 
-        // 3. 【关键修改】重新构造 Response 对象，确保二进制流完整
-        const body = await originalResponse.arrayBuffer();
-        const response = new Response(body, {
-            status: originalResponse.status,
-            statusText: originalResponse.statusText,
-        });
-
-        // 4. 强制设置正确的 MIME 类型
-        const ext = fileName.split('.').pop().toLowerCase();
+        // 3. 【最关键】构造全新的 Headers，彻底干掉“直接下载”的行为
+        const newHeaders = new Headers(response.headers);
+        
+        // 映射 MIME 类型
         const mimeTypes = {
             'gif': 'image/gif',
             'png': 'image/png',
@@ -47,44 +35,26 @@ export async function onRequest(context) {
             'jpeg': 'image/jpeg',
             'webp': 'image/webp'
         };
-        
+
         if (mimeTypes[ext]) {
-            response.headers.set('Content-Type', mimeTypes[ext]);
+            newHeaders.set('Content-Type', mimeTypes[ext]);
+        } else {
+            newHeaders.set('Content-Type', 'image/gif'); // 默认兜底为 gif
         }
+
+        // 移除可能导致强制下载的 Header (如果 Telegram 返回了的话)
+        newHeaders.delete('Content-Disposition');
         
-        response.headers.set('Cache-Control', 'public, max-age=31536000');
-        response.headers.set('Access-Control-Allow-Origin', '*');
+        // 允许跨域，方便 Markdown 预览
+        newHeaders.set('Access-Control-Allow-Origin', '*');
+        newHeaders.set('Cache-Control', 'public, max-age=31536000');
 
-        // --- 以下是你的原版管理逻辑（KV 记录等） ---
-        const isAdmin = request.headers.get('Referer')?.includes(`${url.origin}/admin`);
-        if (isAdmin) return response;
-        if (!env.img_url) return response;
-
-        let record = await env.img_url.getWithMetadata(params.id);
-        if (!record || !record.metadata) {
-            const metadata = {
-                ListType: "None", Label: "None", TimeStamp: Date.now(),
-                liked: false, fileName: params.id, fileSize: 0,
-            };
-            await env.img_url.put(params.id, "", { metadata });
-        } else if (record.metadata.ListType === "Block" || record.metadata.Label === "adult") {
-            return Response.redirect(`${url.origin}/block-img.html`, 302);
-        }
-
-        return response;
+        return new Response(response.body, {
+            status: response.status,
+            headers: newHeaders,
+        });
 
     } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500 });
-    }
-}
-
-async function getFilePath(env, file_id) {
-    try {
-        const url = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${file_id}`;
-        const res = await fetch(url);
-        const data = await res.json();
-        return data.ok ? data.result.file_path : null;
-    } catch (error) {
-        return null;
     }
 }
